@@ -1,45 +1,42 @@
 use std::sync::Arc;
-use std::time::Duration;
-use wgpu::util::DeviceExt;
-use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::KeyCode;
+use wgpu::wgt::AccelerationStructureCopy::Clone;
+use crate::render_backend::buffer::Vertex;
 use winit::window::Window;
-
-use crate::camera::{Camera, CameraController, CameraUniform, Projection};
-use crate::renderer::context::WgpuContext;
-use crate::renderer::Material;
-use crate::renderer::Mesh;
-use crate::renderer::InstanceBuffer;
-use crate::renderer::RenderPipelineBuilder;
-use crate::renderer::{Scene, SceneObject};
-use crate::renderer::model::Model;
-use crate::texture::Texture;
+use crate::render_backend::context::WgpuContext;
+use crate::render_backend::mesh::Mesh;
+use crate::render_backend::scene::Scene;
 
 pub struct State {
     pub window: Arc<Window>,
     context: WgpuContext,
     render_pipeline: wgpu::RenderPipeline,
-    camera: Camera,
-    projection: Projection,
-    pub camera_controller: CameraController,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    camera_uniform: CameraUniform,
-    depth_texture: Texture,
-    scene: Scene,
-    model: Model,
+    scene: Scene
 }
-// lib.rs
-#[repr(C)]
-#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct LightUniform {
-    position: [f32; 3],
-    // Due to uniforms requiring 16 byte (4 float) spacing, we need to use a padding field here
-    _padding: u32,
-    color: [f32; 3],
-    // Due to uniforms requiring 16 byte (4 float) spacing, we need to use a padding field here
-    _padding2: u32,
-}
+
+pub const VERTICES: [Vertex; 8] = [
+    // Collider 1: (0.2, 1.0) - Rouge
+    Vertex { position: [-0.2, -1.0, 0.0], color: [1.0, 0.0, 0.0] },
+    Vertex { position: [0.2, -1.0, 0.0], color: [1.0, 0.0, 0.0] },
+    Vertex { position: [0.2, 1.0, 0.0], color: [1.0, 0.0, 0.0] },
+    Vertex { position: [-0.2, 1.0, 0.0], color: [1.0, 0.0, 0.0] },
+
+    // Collider 2: (0.1, 0.1) - Vert
+    Vertex { position: [-0.1, -0.1, 0.0], color: [0.0, 1.0, 0.0] },
+    Vertex { position: [0.1, -0.1, 0.0], color: [0.0, 1.0, 0.0] },
+    Vertex { position: [0.1, 0.1, 0.0], color: [0.0, 1.0, 0.0] },
+    Vertex { position: [-0.1, 0.1, 0.0], color: [0.0, 1.0, 0.0] },
+];
+
+// Tableau d'indices (2 triangles par collider)
+pub const INDICES: [u16; 12] = [
+    // Collider 1
+    0, 1, 2,
+    0, 2, 3,
+
+    // Collider 2
+    4, 5, 6,
+    4, 6, 7,
+];
 
 impl State {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
@@ -48,174 +45,70 @@ impl State {
         let size = window.inner_size();
         context.resize(size.width, size.height);
 
-        // Camera setup
-        let camera = Camera::new(
-            (0.0, 5.0, 10.0),
-            cgmath::Deg(-90.0),
-            cgmath::Deg(-20.0),
-        );
-        let projection = Projection::new(
-            context.config.width,
-            context.config.height,
-            cgmath::Deg(45.0),
-            0.1,
-            100.0,
-        );
-        let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update_view_proj(&camera, &projection);
-
-        let camera_buffer =
-            context
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Camera Buffer"),
-                    contents: bytemuck::cast_slice(&[camera_uniform]),
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                });
-
-        let camera_bind_group_layout = Self::create_camera_bind_group_layout(&context.device);
-
-        let camera_bind_group = context.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Camera Bind Group"),
-            layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-        });
-
-        let light_uniform = LightUniform {
-            position: [2.0, 2.0, 2.0],
-            _padding: 0,
-            color: [1.0, 1.0, 1.0],
-            _padding2: 0,
-        };
-
-        // We'll want to update our lights position, so we use COPY_DST
-        let light_buffer = context.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("Light VB"),
-                contents: bytemuck::cast_slice(&[light_uniform]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            }
-        );
-
-        let light_bind_group_layout =
-            context.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: None,
-            });
-
-        let light_bind_group = context.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &light_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: light_buffer.as_entire_binding(),
-            }],
-            label: None,
-        });
 
         // Pipeline
-        let pipeline_builder = RenderPipelineBuilder::new(context.device.clone());
-        let render_pipeline = pipeline_builder.build(context.format(), &camera_bind_group_layout);
+        let shader = context
+            .device
+            .create_shader_module(wgpu::include_wgsl!("../shaders/shader.wgsl"));
 
-        // Depth texture
-        let depth_texture = Texture::create_depth_texture(
-            &context.device,
-            &context.config,
-            Some("Depth Texture"),
-        );
-
-        // Load mesh and material
-        let mesh = Mesh::from_glb(
-            &context.device,
-            "C:\\Users\\grego\\Game_Dev\\Mini_Game_1\\renderer\\rendering\\src\\model\\player.glb",
-        )?;
-
-        let model = Model::load(&context.device, "C:\\Users\\grego\\Game_Dev\\teste\\src\\models\\rocket.glb").unwrap();
-
-        let material = Material::new(
-            &context.device,
-            &context.queue,
-            include_bytes!("../images/tree.jpeg"),
-            "tree",
-        )?;
-
-        let render_pipeline_layout = context.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[
-                &camera_bind_group_layout,
-                &light_bind_group_layout,
-            ],
-            push_constant_ranges: &[],
-        });
-
-        // Create instances
-        let instances = Scene::create_grid_instances(1, 1);
-        let instance_buffer = InstanceBuffer::new(&context.device, instances);
+        let render_pipeline = context.device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Render Pipeline"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[Vertex::desc()],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: context.config.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview: None,
+                cache: None,
+            });
 
         let mut scene = Scene::new();
-        scene.add_object(SceneObject::new(mesh, material, instance_buffer));
+        let mesh: Mesh = Mesh::from_vertices(
+            &context.device,
+            &VERTICES,
+            &INDICES,
+        );
+
+        scene.add_object(mesh);
 
         Ok(Self {
             window,
             context,
             render_pipeline,
-            camera,
-            projection,
-            camera_controller: CameraController::new(4.0, 0.4),
-            camera_buffer,
-            camera_bind_group,
-            camera_uniform,
-            depth_texture,
-            scene,
-            model
-        })
-    }
-
-    fn create_camera_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Camera Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
+            scene
         })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.context.resize(width, height);
-        self.projection.resize(width, height);
-        self.depth_texture = Texture::create_depth_texture(
-            &self.context.device,
-            &self.context.config,
-            Some("Depth Texture"),
-        );
-    }
-
-    pub fn update(&mut self, dt: Duration) {
-        self.camera_controller.update_camera(&mut self.camera, dt);
-        self.camera_uniform.update_view_proj(&self.camera, &self.projection);
-        self.context.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&[self.camera_uniform]),
-        );
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -244,52 +137,36 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.75,
-                            g: 0.5,
-                            b: 0.25,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture.view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
+                depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
 
-            // Render all objects in scene
-            for object in self.scene.objects() {
-                render_pass.set_bind_group(0, object.material().bind_group(), &[]);
-                render_pass.set_vertex_buffer(0, object.mesh().vertex_buffer().slice(..));
-                render_pass.set_vertex_buffer(1, object.instance_buffer().buffer().slice(..));
-                render_pass.set_index_buffer(
-                    object.mesh().index_buffer().slice(..),
-                    wgpu::IndexFormat::Uint16,
-                );
-
-                render_pass.draw_indexed(
-                    0..object.mesh().num_indices(),
-                    0,
-                    0..object.instance_buffer().len() as u32,
-                );
-
-                self.model.draw(&mut render_pass);
-            }
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16); // 1.
+            render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }
 
         self.context.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
+    }
+
+    pub fn update_instance(&mut self, pos: (f32, f32)) {
+        if let Some(object) = self.scene.objects_mut().get_mut(0) {
+            object.instance_buffer_mut().update_instance(1, pos.into());
+            object.instance_buffer_mut().update(&self.context.queue);
+        }
     }
 }
