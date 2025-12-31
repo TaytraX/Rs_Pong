@@ -1,6 +1,6 @@
 pub mod state;
 pub mod context;
-mod buffer;
+pub(crate) mod buffer;
 mod instance;
 mod mesh;
 mod scene;

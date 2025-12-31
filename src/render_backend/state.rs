@@ -1,52 +1,29 @@
 use std::sync::Arc;
-use wgpu::wgt::AccelerationStructureCopy::Clone;
-use crate::render_backend::buffer::Vertex;
+use std::time::Duration;
 use winit::window::Window;
+
 use crate::render_backend::context::WgpuContext;
 use crate::render_backend::mesh::Mesh;
-use crate::render_backend::scene::Scene;
+use crate::render_backend::scene::{Scene, SceneObject};
+use crate::render_backend::instance::{Instance, InstanceBuffer};
+use crate::engine::Engine;
 
 pub struct State {
     pub window: Arc<Window>,
     context: WgpuContext,
     render_pipeline: wgpu::RenderPipeline,
-    scene: Scene
+    scene: Scene,
+    pub engine: Engine,
 }
 
-pub const VERTICES: [Vertex; 8] = [
-    // Collider 1: (0.2, 1.0) - Rouge
-    Vertex { position: [-0.2, -1.0, 0.0], color: [1.0, 0.0, 0.0] },
-    Vertex { position: [0.2, -1.0, 0.0], color: [1.0, 0.0, 0.0] },
-    Vertex { position: [0.2, 1.0, 0.0], color: [1.0, 0.0, 0.0] },
-    Vertex { position: [-0.2, 1.0, 0.0], color: [1.0, 0.0, 0.0] },
-
-    // Collider 2: (0.1, 0.1) - Vert
-    Vertex { position: [-0.1, -0.1, 0.0], color: [0.0, 1.0, 0.0] },
-    Vertex { position: [0.1, -0.1, 0.0], color: [0.0, 1.0, 0.0] },
-    Vertex { position: [0.1, 0.1, 0.0], color: [0.0, 1.0, 0.0] },
-    Vertex { position: [-0.1, 0.1, 0.0], color: [0.0, 1.0, 0.0] },
-];
-
-// Tableau d'indices (2 triangles par collider)
-pub const INDICES: [u16; 12] = [
-    // Collider 1
-    0, 1, 2,
-    0, 2, 3,
-
-    // Collider 2
-    4, 5, 6,
-    4, 6, 7,
-];
+const QUAD_INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
 
 impl State {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let mut context = WgpuContext::new(window.clone()).await?;
-
         let size = window.inner_size();
         context.resize(size.width, size.height);
 
-
-        // Pipeline
         let shader = context
             .device
             .create_shader_module(wgpu::include_wgsl!("../shaders/shader.wgsl"));
@@ -59,7 +36,10 @@ impl State {
                     module: &shader,
                     entry_point: Some("vs_main"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers: &[Vertex::desc()],
+                    buffers: &[
+                        crate::render_backend::buffer::Vertex::desc(),
+                        InstanceBuffer::vertex_buffer_layout(),
+                    ],
                 },
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
@@ -91,24 +71,62 @@ impl State {
             });
 
         let mut scene = Scene::new();
-        let mesh: Mesh = Mesh::from_vertices(
-            &context.device,
-            &VERTICES,
-            &INDICES,
-        );
+        let engine = Engine::new();
 
-        scene.add_object(mesh);
+        // ✅ CRÉER MESHES DEPUIS COLLIDERS
+
+        // Mesh des raquettes (2 instances)
+        let paddle_vertices = engine.physics.scene.player1.collider.to_vertices();
+        let paddle_mesh = Mesh::from_vertices(&context.device, &paddle_vertices, &QUAD_INDICES);
+        let paddle_instances = vec![
+            Instance::new(engine.physics.scene.player1.position),
+            Instance::new(engine.physics.scene.player2.position),
+        ];
+        let paddle_buffer = InstanceBuffer::new(&context.device, paddle_instances);
+        scene.add_object(SceneObject::new(paddle_mesh, paddle_buffer));
+
+        // Mesh de la balle (1 instance)
+        let ball_vertices = engine.physics.scene.ball.collider.to_vertices();
+        let ball_mesh = Mesh::from_vertices(&context.device, &ball_vertices, &QUAD_INDICES);
+        let ball_instances = vec![Instance::new(engine.physics.scene.ball.position)];
+        let ball_buffer = InstanceBuffer::new(&context.device, ball_instances);
+        scene.add_object(SceneObject::new(ball_mesh, ball_buffer));
 
         Ok(Self {
             window,
             context,
             render_pipeline,
-            scene
+            scene,
+            engine,
         })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         self.context.resize(width, height);
+    }
+
+    pub fn update(&mut self, _dt: Duration) {
+        self.engine.update();
+
+        // ✅ SYNC POSITIONS : Engine → Renderer
+
+        // Raquettes (objet 0)
+        if let Some(paddles) = self.scene.objects_mut().get_mut(0) {
+            paddles
+                .instance_buffer_mut()
+                .update_instance(0, self.engine.physics.scene.player1.position);
+            paddles
+                .instance_buffer_mut()
+                .update_instance(1, self.engine.physics.scene.player2.position);
+            paddles.instance_buffer_mut().update(&self.context.queue);
+        }
+
+        // Balle (objet 1)
+        if let Some(ball) = self.scene.objects_mut().get_mut(1) {
+            ball.instance_buffer_mut()
+                .update_instance(0, self.engine.physics.scene.ball.position);
+            ball.instance_buffer_mut().update(&self.context.queue);
+        }
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -152,21 +170,25 @@ impl State {
 
             render_pass.set_pipeline(&self.render_pipeline);
 
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16); // 1.
-            render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+            for object in self.scene.objects() {
+                render_pass.set_vertex_buffer(0, object.mesh().vertex_buffer().slice(..));
+                render_pass.set_vertex_buffer(1, object.instance_buffer().buffer().slice(..));
+                render_pass.set_index_buffer(
+                    object.mesh().index_buffer().slice(..),
+                    wgpu::IndexFormat::Uint16,
+                );
+
+                render_pass.draw_indexed(
+                    0..object.mesh().num_indices(),
+                    0,
+                    0..object.instance_buffer().len() as u32,
+                );
+            }
         }
 
         self.context.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
-    }
-
-    pub fn update_instance(&mut self, pos: (f32, f32)) {
-        if let Some(object) = self.scene.objects_mut().get_mut(0) {
-            object.instance_buffer_mut().update_instance(1, pos.into());
-            object.instance_buffer_mut().update(&self.context.queue);
-        }
     }
 }

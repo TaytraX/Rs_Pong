@@ -1,37 +1,38 @@
 use glam::Vec2;
+use crate::render_backend::buffer::Vertex;
 
+#[derive(Clone)]
 pub struct Collider {
-    pub tl: Vec2,
-    pub tr: Vec2,
-    pub bl: Vec2,
-    pub br: Vec2,
+    pub half_size: Vec2,
+    pub color: [f32; 3],
 }
 
 impl Collider {
-    pub fn new(size: (f32, f32)) -> Self {
-        Self {
-            tl: Vec2::new(-size.0,  size.1),
-            tr: Vec2::new( size.0,  size.1),
-            bl: Vec2::new(-size.0, -size.1),
-            br: Vec2::new( size.0, -size.1)
-        }
+    pub fn new(half_size: Vec2, color: [f32; 3]) -> Self {
+        Self { half_size, color }
     }
 
-    pub fn collide(&self, other: &Collider) -> bool {
-        if self.tr.x >= other.tl.x &&
-            self.tl.x <= other.tr.x &&
-            self.tl.y >= other.bl.y &&
-            self.br.y <= other.tr.y {
-            return true;
-        };
-        false
+    pub fn to_vertices(&self) -> [Vertex; 4] {
+        let w = self.half_size.x;
+        let h = self.half_size.y;
+
+        [
+            Vertex { position: [-w, -h, 0.0], color: self.color },
+            Vertex { position: [ w, -h, 0.0], color: self.color },
+            Vertex { position: [ w,  h, 0.0], color: self.color },
+            Vertex { position: [-w,  h, 0.0], color: self.color }
+        ]
     }
 
-    pub fn update(&mut self, position: Vec2) {
-        let t = glam::Mat3::from_translation(position);
-        self.tl = (t * self.tl.extend(1.0)).truncate();
-        self.tr = (t * self.tr.extend(1.0)).truncate();
-        self.bl = (t * self.bl.extend(1.0)).truncate();
-        self.br = (t * self.br.extend(1.0)).truncate();
+    pub fn collides_with(&self, self_pos: Vec2, other: &Collider, other_pos: Vec2) -> bool {
+        let self_min = self_pos - self.half_size;
+        let self_max = self_pos + self.half_size;
+        let other_min = other_pos - other.half_size;
+        let other_max = other_pos + other.half_size;
+
+        self_max.x >= other_min.x
+            && self_min.x <= other_max.x
+            && self_max.y >= other_min.y
+            && self_min.y <= other_max.y
     }
 }

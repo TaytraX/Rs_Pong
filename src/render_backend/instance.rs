@@ -1,4 +1,4 @@
-use glam::{Mat3, Vec2};
+use glam::{Mat4, Vec2};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 
 #[repr(C)]
@@ -38,6 +38,7 @@ impl InstanceRaw {
     }
 }
 
+#[derive(Clone)]
 pub struct Instance {
     pub position: Vec2,
 }
@@ -48,8 +49,11 @@ impl Instance {
     }
 
     pub(crate) fn to_raw(&self) -> InstanceRaw {
+        // ✅ Utiliser Mat4
+        let translation = Mat4::from_translation(self.position.extend(0.0));
+
         InstanceRaw {
-            model: Mat3::from_translation(self.position).into()
+            model: translation.to_cols_array_2d()
         }
     }
 }

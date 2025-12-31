@@ -41,7 +41,8 @@ impl Scene {
         }
     }
 
-    pub fn add_object(&mut self, object: Mesh) {
+    // ✅ CORRIGÉ : Accepte SceneObject, pas Mesh
+    pub fn add_object(&mut self, object: SceneObject) {
         self.objects.push(object);
     }
 
