@@ -1,0 +1,14 @@
+[package]
+name = "Rs_Pong"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+glam = "*"
+winit = "*"
+instant = "0.1.13"
+pollster = "0.4.0"
+wgpu = "*"
+log = "0.4.29"
+bytemuck = "1.24.0"
+anyhow = "1.0.100"
