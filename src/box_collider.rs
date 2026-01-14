@@ -8,8 +8,8 @@ pub struct Collider {
 }
 
 impl Collider {
-    pub fn new(half_size: Vec2, color: [f32; 3]) -> Self {
-        Self { half_size, color }
+    pub fn new(half_size: Vec2, colors: [f32; 3]) -> Self {
+        Self { half_size, color: colors }
     }
 
     pub fn to_vertices(&self) -> [Vertex; 4] {
